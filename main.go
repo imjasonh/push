@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -15,8 +16,23 @@ import (
 	"os"
 	"strings"
 
+	"cloud.google.com/go/compute/metadata"
+	"cloud.google.com/go/firestore"
+	"github.com/google/go-github/v55/github"
 	"github.com/kelseyhightower/envconfig"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
+
+var projectID string
+
+func init() {
+	var err error
+	projectID, err = metadata.ProjectID()
+	if err != nil {
+		log.Fatalf("Failed to get project ID: %v", err)
+	}
+}
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "keygen" {
@@ -33,8 +49,19 @@ func main() {
 		log.Fatalf("Processing env: %v", err)
 	}
 
+	ctx := context.Background()
+	client, err := firestore.NewClient(ctx, projectID)
+	if err != nil {
+		log.Fatalf("Failed to create client: %v", err)
+	}
+	defer client.Close()
+
+	if _, err := client.Collection("users").Doc("test").Get(ctx); err != nil && status.Code(err) != codes.NotFound {
+		log.Fatalf("failed to query users: %v", err)
+	}
+
 	http.HandleFunc("/pubkey", pubkey(env.PrivateKey))
-	http.HandleFunc("/register", register())
+	http.HandleFunc("/register", register(client))
 	http.HandleFunc("/auth/start", authStart(env.GitHubClientID))
 	http.HandleFunc("/auth/callback", authRedirect(env.GitHubClientID, env.GitHubSecret))
 	http.Handle("/", http.FileServer(http.Dir(os.Getenv("KO_DATA_PATH"))))
@@ -56,17 +83,47 @@ func pubkey(privateKey []byte) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, s) }
 }
 
-func register() http.HandlerFunc {
+type doc struct {
+	Endpoint string `firestore:"endpoint"`
+	GHID     string `firestore:"ghid"`
+}
+
+func register(client *firestore.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		log.Println(r.Method, r.URL)
+
 		var req struct {
 			Endpoint string `json:"endpoint"`
 		}
 		defer r.Body.Close()
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			log.Fatalf("Error decoding request: %v", err)
+			log.Printf("Error decoding request: %v", err)
+			http.Error(w, "Bad request", http.StatusBadRequest)
 		}
 		log.Println("Endpoint:", req.Endpoint)
+
+		ghtoken, err := r.Cookie("token")
+		if err != nil {
+			log.Printf("getting GH cookie: %v", err)
+			http.Error(w, "Missing GH token cookie", http.StatusBadRequest)
+		}
+		log.Println("Token:", ghtoken)
+
+		u, _, err := github.NewClient(nil).WithAuthToken(ghtoken.Value).Users.Get(ctx, "")
+		if err != nil {
+			log.Printf("getting current GH user: %v", err)
+			http.Error(w, "Error getting user", http.StatusInternalServerError)
+		}
+
+		// Create or update the document.
+		if _, err := client.Collection("users").Doc(ghtoken.Value).Set(ctx, doc{
+			Endpoint: req.Endpoint,
+			GHID:     fmt.Sprintf("%d", *u.ID),
+		}); err != nil {
+			log.Fatalf("Error adding document: %v", err)
+			http.Error(w, "Error", http.StatusInternalServerError)
+		}
 	}
 }
 
@@ -78,8 +135,6 @@ func authStart(clientID string) http.HandlerFunc {
 			http.Error(w, "Missing client ID", http.StatusInternalServerError)
 			return
 		}
-
-		// TODO: local redirect uri
 
 		url := (&url.URL{
 			Scheme: "https",
@@ -137,8 +192,13 @@ func authRedirect(clientID, secret string) http.HandlerFunc {
 		if err := json.NewDecoder(resp.Body).Decode(&token); err != nil {
 			log.Fatalf("Error decoding response: %v", err)
 		}
-
-		fmt.Fprintln(w, "Access token:", token.Token)
+		log.Println("token:", token.Token) // TODO: save it
+		http.SetCookie(w, &http.Cookie{
+			Name:  "token",
+			Value: token.Token,
+			Path:  "/",
+		})
+		http.Redirect(w, r, "/", http.StatusSeeOther)
 	}
 }
 

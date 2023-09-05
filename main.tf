@@ -50,6 +50,35 @@ resource "google_secret_manager_secret_iam_member" "access-secret" {
   member    = "serviceAccount:${google_service_account.sa.email}"
 }
 
+locals {
+  apis = toset([
+    "firestore.googleapis.com",
+    "run.googleapis.com",
+  ])
+}
+
+resource "google_project_service" "apis" {
+  for_each = local.apis
+  project  = var.project
+  service  = each.key
+
+  disable_on_destroy = false
+}
+
+resource "google_firestore_database" "database" {
+  name        = "(default)"
+  location_id = "nam5"
+  type        = "FIRESTORE_NATIVE"
+
+  depends_on = [google_project_service.apis["firestore.googleapis.com"]]
+}
+
+resource "google_project_iam_member" "access-db" {
+  project = var.project
+  role    = "roles/datastore.user"
+  member  = "serviceAccount:${google_service_account.sa.email}"
+}
+
 // Anybody can invoke the service.
 resource "google_cloud_run_v2_service_iam_binding" "public" {
   location = google_cloud_run_v2_service.app.location
@@ -72,7 +101,7 @@ resource "google_cloud_run_v2_service" "app" {
       dynamic "env" {
         for_each = local.secrets
         content {
-          name = upper(replace(env.key, "-", "_"))
+          name = upper(replace(env.key, "-", "_")) // gh-client-id -> GH_CLIENT_ID
           value_source {
             secret_key_ref {
               secret  = google_secret_manager_secret.secret[env.key].secret_id
@@ -83,6 +112,9 @@ resource "google_cloud_run_v2_service" "app" {
       }
     }
   }
+
+  depends_on = [google_project_service.apis["run.googleapis.com"]]
+
 }
 
 output "url" {

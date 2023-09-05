@@ -32,13 +32,11 @@ This will print a URL to the deployed service, for example:
 url = "https://push-blahblah-blah.a.run.app"
 ```
 
-This packages up the Go backend using `ko_build`, and runs the service with secret access to the private key you generated before.
+This packages up the Go backend using `ko_build`, and runs the service with secret access to the private key you generated before, and a Cloud SQL database to store the push subscription endpoint, and GitHub user info.
 
 ### Get a GitHub client ID and secret
 
 Create a new GitHub OAuth app here: https://github.com/settings/developers
-
-Update the empty files named `gh-client-id` and `gh-secret` that you created before, with the client ID and secret, respectively.
 
 For the redirect URL, use the URL printed by Terraform, with `/auth/callback` appended to it, for example:
 
@@ -46,12 +44,14 @@ For the redirect URL, use the URL printed by Terraform, with `/auth/callback` ap
 https://push-blahblah-blah.a.run.app/auth/callback
 ```
 
-## Running locally
+Update the empty files named `gh-client-id` and `gh-secret` that you created before, with the client ID and secret, respectively.
+
+You'll need to `terraform apply` again to update the new secret values.
+
+### Teardown
+
+Things cost money. To make this stop costing money, teardown the resources you created:
 
 ```
-./local.sh
+terraform destroy
 ```
-
-Then load the URL in your browser: http://localhost:8080/
-
-TODO: GH OAuth doesn't work locally yet.

@@ -8,48 +8,78 @@ document.body.onload = async function () {
     const publicKey = await response.text();
     console.log(`Public key '${publicKey}'`);
 
-    const serviceWorkerRegistration = await navigator.serviceWorker.ready;
-    const subscription = await serviceWorkerRegistration.pushManager.getSubscription()
-    if (subscription == null) {
-        console.log("Subscription is null");
-        return;
-    }
-    const current = btoa(String.fromCharCode.apply(null, new Uint8Array(subscription.options.applicationServerKey)))
-        .replace(/\//g, '_')
-        .replace(/\+/g, '-');
-    if (current !== publicKey) {
-        console.log("Application server key is not the same",
-            `current='${current}'`,
-            `want='${publicKey}'`);
-        await subscription.unsubscribe();
-        console.log("unsubscribed", successful);
-    } else {
-        console.log("Already subscribed with correct public key", current);
-        console.log("Endpoint:", subscription.endpoint);
+    const btn = document.createElement('button');
+    btn.id = 'button';
+    btn.textContent = "Loading...";
+    document.body.appendChild(btn);
+    console.log('Cookies:', document.cookie);
+    if (document.cookie.indexOf('token=gho_') < 0) {
+        console.log("No GH token found");
+        btn.addEventListener('click', async () => { document.location = "/auth/start"; })
+        btn.textContent = "Login with GitHub";
+        return
     }
 
-    document.getElementById('button').addEventListener('click', async () => {
-        const serviceWorkerRegistration = await navigator.serviceWorker.register("worker.js")
-        const pushSubscription = await serviceWorkerRegistration.pushManager.subscribe({
-            userVisibleOnly: true,
-            applicationServerKey: publicKey,
-        })
-        console.log("Endpoint:", pushSubscription.endpoint);
-        const response = await fetch("/register", {
-            method: "POST",
-            body: JSON.stringify({
-                endpoint: pushSubscription.endpoint,
-            }),
-        })
-        if (!response.ok) {
-            console.error("registering", response);
-        } else {
-            console.log("registered!");
-        }
-    });
+    navigator.serviceWorker.ready
+        .catch((err) => { console.error("ready", err); })
+        .then(async (serviceWorkerRegistration) => {
+            console.log('ready', serviceWorkerRegistration);
+            const subscription = await serviceWorkerRegistration.pushManager.getSubscription()
+            console.log('subscription', subscription);
+            if (subscription != null) {
+                const current = btoa(String.fromCharCode.apply(null, new Uint8Array(subscription.options.applicationServerKey)))
+                    .replace(/\//g, '_')
+                    .replace(/\+/g, '-');
+                if (current !== publicKey) {
+                    console.log("Application server key is not the same",
+                        `current='${current}'`,
+                        `want='${publicKey}'`);
+                    await subscription.unsubscribe();
+                    console.log("unsubscribed", successful);
+                } else {
+                    console.log("Already subscribed with correct public key", current);
+                    await register(subscription.endpoint);
+                    btn.textContent = "Unsubscribe";
+                    btn.onclick = async () => {
+                        await subscription.unsubscribe();
+                        console.log("unsubscribed", successful);
+                        // TODO: unregister from server
+                        document.location.reload();
+                    };
+                    return
+                }
+            }
+
+            btn.textContent = "Subscribe";
+            btn.addEventListener('click', async () => {
+                console.log('Button clicked');
+                navigator.serviceWorker.register("worker.js")
+                    .then(async (serviceWorkerRegistration) => {
+                        const subscription = await serviceWorkerRegistration.pushManager.subscribe({
+                            userVisibleOnly: true,
+                            applicationServerKey: publicKey.replace(/\=/g, ""),
+                        })
+                        await register(subscription.endpoint);
+                    })
+                    .catch((err) => {
+                        console.error("registering", err);
+                    });
+            });
+        });
 };
 
 this.onpush = (event) => {
     console.log(event.data); // TODO
 };
 
+async function register(endpoint) {
+    console.log("Endpoint:", endpoint);
+    const response = await fetch("/register", {
+        method: "POST",
+        body: JSON.stringify({ endpoint: endpoint }),
+    });
+    if (!response.ok) {
+        console.error("registering", response);
+    }
+    console.log("registered", response);
+}
