@@ -1,7 +1,13 @@
+# TF gunk
 *.tfstate*
 *.terraform.lock.hcl
 .terraform*
 *.tfvars
 
-
+# Secrets
 private.pem
+gh-client-id
+gh-secret
+
+# Built Go app
+push

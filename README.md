@@ -5,9 +5,13 @@ This is an experimental Go backend and JavaScript frontend for sending push noti
 This is mainly a learning exercise for me to learn how to do this.
 Maybe someday I'll do something useful with it.
 
-## Generate a keypair
+## Setup
 
-To start, you'll need to generate a keypair, which will be used to sign the JWTs used to authenticate the push notifications.
+To bootstrap, create empty files named `gh-client-id` and `gh-secret`. We'll fill these in later.
+
+### Generate a keypair
+
+You'll also need to generate a keypair, which will be used to sign the JWTs used to authenticate the push notifications.
 
 ```
 go run ./ keygen
@@ -30,12 +34,24 @@ url = "https://push-blahblah-blah.a.run.app"
 
 This packages up the Go backend using `ko_build`, and runs the service with secret access to the private key you generated before.
 
-## Running locally
+### Get a GitHub client ID and secret
 
-### Run service
+Create a new GitHub OAuth app here: https://github.com/settings/developers
+
+Update the empty files named `gh-client-id` and `gh-secret` that you created before, with the client ID and secret, respectively.
+
+For the redirect URL, use the URL printed by Terraform, with `/auth/callback` appended to it, for example:
 
 ```
-KO_DATA_PATH=kodata go run ./
+https://push-blahblah-blah.a.run.app/auth/callback
+```
+
+## Running locally
+
+```
+./local.sh
 ```
 
 Then load the URL in your browser: http://localhost:8080/
+
+TODO: GH OAuth doesn't work locally yet.

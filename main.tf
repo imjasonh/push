@@ -18,25 +18,36 @@ resource "ko_build" "app" {
   importpath = "push"
 }
 
-resource "google_secret_manager_secret" "private-key" {
-  secret_id = "private-key"
+locals {
+  secrets = {
+    "private-key" : trimspace(file("private.pem"))
+    "gh-client-id" : trimspace(file("gh-client-id"))
+    "gh-secret" : trimspace(file("gh-secret"))
+  }
+}
+
+resource "google_secret_manager_secret" "secret" {
+  for_each  = local.secrets
+  secret_id = each.key
   replication { automatic = true }
 }
 
-resource "google_secret_manager_secret_version" "private-key" {
-  secret      = google_secret_manager_secret.private-key.name
-  secret_data = file("private.pem")
+resource "google_secret_manager_secret_version" "secret" {
+  for_each    = local.secrets
+  secret      = google_secret_manager_secret.secret[each.key].name
+  secret_data = each.value
 }
 
 resource "google_service_account" "sa" {
   account_id = "push-sa"
 }
 
-resource "google_secret_manager_secret_iam_member" "access-private-key" {
-  secret_id  = google_secret_manager_secret.private-key.secret_id
-  role       = "roles/secretmanager.secretAccessor"
-  member     = "serviceAccount:${google_service_account.sa.email}"
-  depends_on = [google_secret_manager_secret.private-key]
+resource "google_secret_manager_secret_iam_member" "access-secret" {
+  for_each = local.secrets
+
+  secret_id = google_secret_manager_secret.secret[each.key].secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.sa.email}"
 }
 
 // Anybody can invoke the service.
@@ -55,26 +66,20 @@ resource "google_cloud_run_v2_service" "app" {
   template {
     service_account = google_service_account.sa.email
 
-    volumes {
-      name = "secret-volume"
-      secret {
-        secret = google_secret_manager_secret.private-key.secret_id
-        items {
-          version = "latest"
-          path    = "private.pem"
-          mode    = 0 # use default 0444
-        }
-      }
-    }
     containers {
       image = ko_build.app.image_ref
-      volume_mounts {
-        name       = "secret-volume"
-        mount_path = "/secret"
-      }
-      env {
-        name  = "PRIVATE_KEY_PATH"
-        value = "/secret/private.pem"
+
+      dynamic "env" {
+        for_each = local.secrets
+        content {
+          name = upper(replace(env.key, "-", "_"))
+          value_source {
+            secret_key_ref {
+              secret  = google_secret_manager_secret.secret[env.key].secret_id
+              version = "latest"
+            }
+          }
+        }
       }
     }
   }
