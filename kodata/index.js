@@ -34,14 +34,14 @@ document.body.onload = async function () {
                     console.log("Application server key is not the same",
                         `current='${current}'`,
                         `want='${publicKey}'`);
-                    await subscription.unsubscribe();
+                    const successful = await subscription.unsubscribe();
                     console.log("unsubscribed", successful);
                 } else {
                     console.log("Already subscribed with correct public key", current);
                     await register(subscription.endpoint);
                     btn.textContent = "Unsubscribe";
                     btn.onclick = async () => {
-                        await subscription.unsubscribe();
+                        const successful = await subscription.unsubscribe();
                         console.log("unsubscribed", successful);
                         // TODO: unregister from server
                         document.location.reload();
@@ -60,6 +60,13 @@ document.body.onload = async function () {
                             applicationServerKey: publicKey.replace(/\=/g, ""),
                         })
                         await register(subscription.endpoint);
+                        btn.textContent = "Unsubscribe";
+                        btn.onclick = async () => {
+                            const successful = await subscription.unsubscribe();
+                            console.log("unsubscribed", successful);
+                            // TODO: unregister from server
+                            document.location.reload();
+                        };
                     })
                     .catch((err) => {
                         console.error("registering", err);
