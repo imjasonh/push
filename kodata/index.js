@@ -1,4 +1,3 @@
-
 document.body.onload = async function () {
     const response = await fetch("/pubkey");
     if (!response.ok) {
@@ -52,8 +51,8 @@ document.body.onload = async function () {
 
             btn.textContent = "Subscribe";
             btn.addEventListener('click', async () => {
-                console.log('Button clicked');
                 navigator.serviceWorker.register("worker.js")
+                    .catch((err) => { console.error("registering", err); })
                     .then(async (serviceWorkerRegistration) => {
                         const subscription = await serviceWorkerRegistration.pushManager.subscribe({
                             userVisibleOnly: true,
@@ -68,9 +67,6 @@ document.body.onload = async function () {
                             document.location.reload();
                         };
                     })
-                    .catch((err) => {
-                        console.error("registering", err);
-                    });
             });
         });
 };

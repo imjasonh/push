@@ -55,3 +55,11 @@ Things cost money. To make this stop costing money, teardown the resources you c
 ```
 terraform destroy
 ```
+
+## How it works
+
+First you go through a GitHub OAuth flow, which asks for permission to interact with your GitHub notifications, and stores the resulting access token in a cookie.
+
+Then you set up the push notification, which asks for permission to bug you with notifications, and stores the resulting subscription endpoint and your GitHub token in the database.
+
+Then (TODO) the Go backend will poll GitHub for notifications, and send them to the frontend via the push subscription endpoint.
