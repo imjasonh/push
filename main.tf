@@ -20,7 +20,6 @@ resource "ko_build" "app" {
 
 locals {
   secrets = {
-    "private-key" : trimspace(file("private.pem"))
     "gh-client-id" : trimspace(file("gh-client-id"))
     "gh-secret" : trimspace(file("gh-secret"))
   }
@@ -52,9 +51,43 @@ resource "google_secret_manager_secret_iam_member" "access-secret" {
 
 locals {
   apis = toset([
+    "cloudkms.googleapis.com",
     "firestore.googleapis.com",
     "run.googleapis.com",
   ])
+}
+
+resource "google_kms_key_ring" "push_keyring" {
+  name     = "push-keyring"
+  location = "global"
+
+  depends_on = [google_project_service.apis["cloudkms.googleapis.com"]]
+}
+
+resource "google_kms_crypto_key" "vapid_key" {
+  name            = "vapid-signing-key"
+  key_ring        = google_kms_key_ring.push_keyring.id
+  purpose         = "ASYMMETRIC_SIGN"
+  
+  version_template {
+    algorithm = "EC_SIGN_P256_SHA256"
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+resource "google_kms_crypto_key_iam_member" "vapid_key_signer" {
+  crypto_key_id = google_kms_crypto_key.vapid_key.id
+  role          = "roles/cloudkms.signerVerifier"
+  member        = "serviceAccount:${google_service_account.sa.email}"
+}
+
+resource "google_kms_crypto_key_iam_member" "vapid_key_viewer" {
+  crypto_key_id = google_kms_crypto_key.vapid_key.id
+  role          = "roles/cloudkms.publicKeyViewer"
+  member        = "serviceAccount:${google_service_account.sa.email}"
 }
 
 resource "google_project_service" "apis" {
@@ -109,6 +142,11 @@ resource "google_cloud_run_v2_service" "app" {
             }
           }
         }
+      }
+
+      env {
+        name  = "KMS_KEY_NAME"
+        value = google_kms_crypto_key.vapid_key.id
       }
     }
   }

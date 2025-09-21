@@ -42,7 +42,8 @@ document.body.onload = async function () {
                     btn.onclick = async () => {
                         const successful = await subscription.unsubscribe();
                         console.log("unsubscribed", successful);
-                        // TODO: unregister from server
+                        // Unregister from server
+                        await unregister();
                         document.location.reload();
                     };
                     return
@@ -63,7 +64,8 @@ document.body.onload = async function () {
                         btn.onclick = async () => {
                             const successful = await subscription.unsubscribe();
                             console.log("unsubscribed", successful);
-                            // TODO: unregister from server
+                            // Unregister from server
+                            await unregister();
                             document.location.reload();
                         };
                     })
@@ -72,7 +74,8 @@ document.body.onload = async function () {
 };
 
 this.onpush = (event) => {
-    console.log(event.data); // TODO
+    console.log('Push event data:', event.data);
+    // This is handled by the service worker
 };
 
 async function register(endpoint) {
@@ -83,6 +86,19 @@ async function register(endpoint) {
     });
     if (!response.ok) {
         console.error("registering", response);
+        throw new Error(`Registration failed: ${response.status}`);
     }
     console.log("registered", response);
+}
+
+async function unregister() {
+    console.log("Unregistering from server...");
+    const response = await fetch("/unregister", {
+        method: "POST",
+    });
+    if (!response.ok) {
+        console.error("unregistering", response);
+        throw new Error(`Unregistration failed: ${response.status}`);
+    }
+    console.log("unregistered", response);
 }

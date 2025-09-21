@@ -9,13 +9,11 @@ Maybe someday I'll do something useful with it.
 
 To bootstrap, create empty files named `gh-client-id` and `gh-secret`. We'll fill these in later.
 
-### Generate a keypair
+### Key Management
 
-You'll also need to generate a keypair, which will be used to sign the JWTs used to authenticate the push notifications.
+The application uses Google Cloud Key Management Service (KMS) to securely manage the VAPID signing keys. The Terraform configuration will automatically create the necessary KMS keyring and key for you.
 
-```
-go run ./ keygen
-```
+The old `keygen` command is still available for backward compatibility, but the generated keys will not be used when deploying to Cloud Run with KMS.
 
 ## Deploying to Cloud Run
 
@@ -32,7 +30,7 @@ This will print a URL to the deployed service, for example:
 url = "https://push-blahblah-blah.a.run.app"
 ```
 
-This packages up the Go backend using `ko_build`, and runs the service with secret access to the private key you generated before, and a Cloud SQL database to store the push subscription endpoint, and GitHub user info.
+This packages up the Go backend using `ko_build`, and runs the service with secret access to the GitHub OAuth credentials, a Cloud SQL database to store the push subscription endpoint and GitHub user info, and a KMS-managed signing key for VAPID authentication.
 
 ### Get a GitHub client ID and secret
 
