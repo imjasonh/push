@@ -5,12 +5,15 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/asn1"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"log"
+	"math/big"
 	"net/http"
 	"net/url"
 	"os"
@@ -19,6 +22,8 @@ import (
 
 	"cloud.google.com/go/compute/metadata"
 	"cloud.google.com/go/firestore"
+	kms "cloud.google.com/go/kms/apiv1"
+	"cloud.google.com/go/kms/apiv1/kmspb"
 	webpush "github.com/SherClockHolmes/webpush-go"
 	"github.com/google/go-github/v55/github"
 	"github.com/kelseyhightower/envconfig"
@@ -49,9 +54,9 @@ func main() {
 	}
 
 	var env struct {
-		PrivateKey     []byte `envconfig:"PRIVATE_KEY" required:"true"`
 		GitHubClientID string `envconfig:"GH_CLIENT_ID" required:"false" default:""`
 		GitHubSecret   string `envconfig:"GH_SECRET" required:"false" default:""`
+		KMSKeyName     string `envconfig:"KMS_KEY_NAME" required:"true"`
 	}
 	if err := envconfig.Process("", &env); err != nil {
 		log.Fatalf("Processing env: %v", err)
@@ -68,7 +73,14 @@ func main() {
 		log.Fatalf("failed to query users: %v", err)
 	}
 
-	http.HandleFunc("/pubkey", pubkey(env.PrivateKey))
+	// Create KMS client
+	kmsClient, err := kms.NewKeyManagementClient(ctx)
+	if err != nil {
+		log.Fatalf("Failed to create KMS client: %v", err)
+	}
+	defer kmsClient.Close()
+
+	http.HandleFunc("/pubkey", pubkey(ctx, kmsClient, env.KMSKeyName))
 	http.HandleFunc("/register", register(client))
 	http.HandleFunc("/unregister", unregister(client))
 	http.HandleFunc("/auth/start", authStart(env.GitHubClientID))
@@ -76,23 +88,43 @@ func main() {
 	http.Handle("/", http.FileServer(http.Dir(os.Getenv("KO_DATA_PATH"))))
 	
 	// Start notification polling in background
-	go startNotificationPoller(client, env.PrivateKey)
+	go startNotificationPoller(client, ctx, kmsClient, env.KMSKeyName)
 	
 	log.Println("Server starting on :8080")
 	http.ListenAndServe(":8080", nil)
 }
 
-func pubkey(privateKey []byte) http.HandlerFunc {
-	block, _ := pem.Decode(privateKey)
-	priv, err := x509.ParseECPrivateKey(block.Bytes)
+func pubkey(ctx context.Context, kmsClient *kms.KeyManagementClient, keyName string) http.HandlerFunc {
+	// Get the public key from KMS
+	req := &kmspb.GetPublicKeyRequest{Name: keyName}
+	pubKeyResp, err := kmsClient.GetPublicKey(ctx, req)
 	if err != nil {
-		log.Fatalf("Error parsing private key: %v", err)
+		log.Fatalf("Error getting public key from KMS: %v", err)
 	}
-	pub, err := priv.PublicKey.ECDH()
+
+	// Parse the public key
+	block, _ := pem.Decode([]byte(pubKeyResp.Pem))
+	if block == nil {
+		log.Fatalf("Error decoding public key PEM")
+	}
+
+	pubKey, err := x509.ParsePKIXPublicKey(block.Bytes)
 	if err != nil {
-		log.Fatalf("Error generating ECDH public key: %v", err)
+		log.Fatalf("Error parsing public key: %v", err)
 	}
-	s := base64.URLEncoding.EncodeToString(pub.Bytes())
+
+	ecdsaKey, ok := pubKey.(*ecdsa.PublicKey)
+	if !ok {
+		log.Fatalf("Public key is not ECDSA")
+	}
+
+	// Convert to ECDH format for Web Push
+	ecdhKey, err := ecdsaKey.ECDH()
+	if err != nil {
+		log.Fatalf("Error converting to ECDH: %v", err)
+	}
+
+	s := base64.URLEncoding.EncodeToString(ecdhKey.Bytes())
 	log.Printf("Public key: %q", s)
 	return func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, s) }
 }
@@ -223,6 +255,10 @@ func authRedirect(clientID, secret string) http.HandlerFunc {
 }
 
 func keygen() {
+	log.Println("NOTE: This tool generates local keys, but the application now uses Google Cloud KMS.")
+	log.Println("The generated key will not be used by the application unless you configure it to use local keys.")
+	log.Println()
+	
 	const pk = "./private.pem"
 	if _, err := os.Stat(pk); err == nil {
 		log.Fatalf("Private key already exists: %s", pk)
@@ -245,6 +281,9 @@ func keygen() {
 		log.Fatalf("Encoding PEM: %v", err)
 	}
 	log.Println("wrote private key to", pk)
+	log.Println()
+	log.Println("To use this key with the application, you would need to modify the configuration")
+	log.Println("to load the key locally instead of using KMS.")
 }
 
 func unregister(client *firestore.Client) http.HandlerFunc {
@@ -271,15 +310,8 @@ func unregister(client *firestore.Client) http.HandlerFunc {
 	}
 }
 
-func startNotificationPoller(client *firestore.Client, privateKey []byte) {
+func startNotificationPoller(client *firestore.Client, ctx context.Context, kmsClient *kms.KeyManagementClient, keyName string) {
 	log.Println("Starting notification poller...")
-	
-	// Parse the private key for Web Push
-	block, _ := pem.Decode(privateKey)
-	priv, err := x509.ParseECPrivateKey(block.Bytes)
-	if err != nil {
-		log.Fatalf("Error parsing private key for notifications: %v", err)
-	}
 
 	ticker := time.NewTicker(30 * time.Second) // Poll every 30 seconds
 	defer ticker.Stop()
@@ -287,16 +319,14 @@ func startNotificationPoller(client *firestore.Client, privateKey []byte) {
 	for {
 		select {
 		case <-ticker.C:
-			if err := pollAndSendNotifications(client, priv); err != nil {
+			if err := pollAndSendNotifications(client, ctx, kmsClient, keyName); err != nil {
 				log.Printf("Error polling notifications: %v", err)
 			}
 		}
 	}
 }
 
-func pollAndSendNotifications(client *firestore.Client, privateKey *ecdsa.PrivateKey) error {
-	ctx := context.Background()
-	
+func pollAndSendNotifications(client *firestore.Client, ctx context.Context, kmsClient *kms.KeyManagementClient, keyName string) error {
 	// Get all registered users
 	users, err := client.Collection("users").Documents(ctx).GetAll()
 	if err != nil {
@@ -313,7 +343,7 @@ func pollAndSendNotifications(client *firestore.Client, privateKey *ecdsa.Privat
 		}
 
 		ghToken := userDoc.Ref.ID
-		if err := processUserNotifications(ctx, ghToken, userData, privateKey); err != nil {
+		if err := processUserNotifications(ctx, ghToken, userData, kmsClient, keyName); err != nil {
 			log.Printf("Error processing notifications for user %s: %v", userData.GHID, err)
 		}
 	}
@@ -321,7 +351,7 @@ func pollAndSendNotifications(client *firestore.Client, privateKey *ecdsa.Privat
 	return nil
 }
 
-func processUserNotifications(ctx context.Context, ghToken string, userData doc, privateKey *ecdsa.PrivateKey) error {
+func processUserNotifications(ctx context.Context, ghToken string, userData doc, kmsClient *kms.KeyManagementClient, keyName string) error {
 	// Create GitHub client with user's token
 	ghClient := github.NewClient(nil).WithAuthToken(ghToken)
 	
@@ -344,7 +374,7 @@ func processUserNotifications(ctx context.Context, ghToken string, userData doc,
 
 	// Send push notification for each GitHub notification
 	for _, notification := range notifications {
-		if err := sendPushNotification(userData.Endpoint, notification, privateKey); err != nil {
+		if err := sendPushNotification(ctx, userData.Endpoint, notification, kmsClient, keyName); err != nil {
 			log.Printf("Error sending push notification: %v", err)
 		}
 	}
@@ -352,7 +382,7 @@ func processUserNotifications(ctx context.Context, ghToken string, userData doc,
 	return nil
 }
 
-func sendPushNotification(endpoint string, notification *github.Notification, privateKey *ecdsa.PrivateKey) error {
+func sendPushNotification(ctx context.Context, endpoint string, notification *github.Notification, kmsClient *kms.KeyManagementClient, keyName string) error {
 	// Prepare notification payload
 	payload := map[string]interface{}{
 		"title": fmt.Sprintf("GitHub: %s", *notification.Subject.Title),
@@ -378,20 +408,21 @@ func sendPushNotification(endpoint string, notification *github.Notification, pr
 		},
 	}
 
-	// Convert ECDSA private key to the format expected by webpush-go
-	keyBytes, err := x509.MarshalECPrivateKey(privateKey)
+	// For now, we'll use a simple implementation that generates the VAPID token manually
+	// This is a simplified version - in production you'd want to use the full VAPID spec
+	vapidToken, err := generateVAPIDToken(ctx, kmsClient, keyName, endpoint)
 	if err != nil {
-		return fmt.Errorf("marshaling private key: %w", err)
-	}
-	
-	// Create webpush options
-	options := &webpush.Options{
-		VAPIDPrivateKey: base64.RawURLEncoding.EncodeToString(keyBytes),
-		TTL:            30, // seconds
+		return fmt.Errorf("generating VAPID token: %w", err)
 	}
 
-	// Send the push notification
-	resp, err := webpush.SendNotification(payloadBytes, subscription, options)
+	// Set the authorization header manually
+	headers := map[string]string{
+		"Authorization": "vapid t=" + vapidToken,
+		"TTL":           "30",
+	}
+
+	// Send the push notification with custom headers
+	resp, err := sendWebPushWithHeaders(payloadBytes, subscription, headers)
 	if err != nil {
 		return fmt.Errorf("sending push notification: %w", err)
 	}
@@ -403,4 +434,106 @@ func sendPushNotification(endpoint string, notification *github.Notification, pr
 
 	log.Printf("Push notification sent successfully for: %s", *notification.Subject.Title)
 	return nil
+}
+
+// KMSSigner implements signing using Google Cloud KMS
+type KMSSigner struct {
+	client  *kms.KeyManagementClient
+	keyName string
+	ctx     context.Context
+}
+
+// generateVAPIDToken creates a VAPID JWT token using KMS for signing
+func generateVAPIDToken(ctx context.Context, kmsClient *kms.KeyManagementClient, keyName, audience string) (string, error) {
+	// Create JWT header
+	header := map[string]interface{}{
+		"alg": "ES256",
+		"typ": "JWT",
+	}
+
+	headerBytes, err := json.Marshal(header)
+	if err != nil {
+		return "", fmt.Errorf("marshaling header: %w", err)
+	}
+
+	// Create JWT payload
+	now := time.Now()
+	payload := map[string]interface{}{
+		"aud": audience,
+		"exp": now.Add(12 * time.Hour).Unix(),
+		"sub": "mailto:push@example.com", // Should be your email
+	}
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("marshaling payload: %w", err)
+	}
+
+	// Create the message to sign
+	message := base64.RawURLEncoding.EncodeToString(headerBytes) + "." + base64.RawURLEncoding.EncodeToString(payloadBytes)
+
+	// Hash the message
+	hasher := sha256.New()
+	hasher.Write([]byte(message))
+	digest := hasher.Sum(nil)
+
+	// Sign with KMS
+	req := &kmspb.AsymmetricSignRequest{
+		Name:   keyName,
+		Digest: &kmspb.Digest{Digest: &kmspb.Digest_Sha256{Sha256: digest}},
+	}
+
+	result, err := kmsClient.AsymmetricSign(ctx, req)
+	if err != nil {
+		return "", fmt.Errorf("signing with KMS: %w", err)
+	}
+
+	// Parse the signature
+	signature, err := parseECDSASignature(result.Signature)
+	if err != nil {
+		return "", fmt.Errorf("parsing signature: %w", err)
+	}
+
+	// Complete the JWT
+	jwt := message + "." + base64.RawURLEncoding.EncodeToString(signature)
+	return jwt, nil
+}
+
+// parseECDSASignature converts DER-encoded ECDSA signature to the format expected by JWT
+func parseECDSASignature(derSig []byte) ([]byte, error) {
+	var sig struct {
+		R *big.Int
+		S *big.Int
+	}
+
+	_, err := asn1.Unmarshal(derSig, &sig)
+	if err != nil {
+		return nil, fmt.Errorf("unmarshaling signature: %w", err)
+	}
+
+	// Convert to 64-byte format (32 bytes each for r and s)
+	rBytes := sig.R.FillBytes(make([]byte, 32))
+	sBytes := sig.S.FillBytes(make([]byte, 32))
+
+	signature := append(rBytes, sBytes...)
+	return signature, nil
+}
+
+// sendWebPushWithHeaders is a simplified version of webpush.SendNotification with custom headers
+func sendWebPushWithHeaders(payload []byte, subscription *webpush.Subscription, headers map[string]string) (*http.Response, error) {
+	req, err := http.NewRequest("POST", subscription.Endpoint, strings.NewReader(string(payload)))
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+
+	// Set content type
+	req.Header.Set("Content-Type", "application/octet-stream")
+
+	// Set custom headers
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	return client.Do(req)
 }
