@@ -15,12 +15,22 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/googleapis/gax-go/v2"
 	kms "cloud.google.com/go/kms/apiv1"
 	"cloud.google.com/go/kms/apiv1/kmspb"
 )
 
+// KMSClient interface defines the methods we need from the KMS client
+type KMSClient interface {
+	GetPublicKey(ctx context.Context, req *kmspb.GetPublicKeyRequest, opts ...gax.CallOption) (*kmspb.PublicKey, error)
+	AsymmetricSign(ctx context.Context, req *kmspb.AsymmetricSignRequest, opts ...gax.CallOption) (*kmspb.AsymmetricSignResponse, error)
+}
+
+// Ensure the real KMS client implements our interface
+var _ KMSClient = (*kms.KeyManagementClient)(nil)
+
 // PublicKeyHandler creates an HTTP handler that returns the public key from KMS
-func PublicKeyHandler(ctx context.Context, kmsClient *kms.KeyManagementClient, keyName string) http.HandlerFunc {
+func PublicKeyHandler(ctx context.Context, kmsClient KMSClient, keyName string) http.HandlerFunc {
 	// Get the public key from KMS
 	req := &kmspb.GetPublicKeyRequest{Name: keyName}
 	pubKeyResp, err := kmsClient.GetPublicKey(ctx, req)
@@ -56,7 +66,7 @@ func PublicKeyHandler(ctx context.Context, kmsClient *kms.KeyManagementClient, k
 }
 
 // GenerateVAPIDToken creates a VAPID JWT token using KMS for signing
-func GenerateVAPIDToken(ctx context.Context, kmsClient *kms.KeyManagementClient, keyName, audience string) (string, error) {
+func GenerateVAPIDToken(ctx context.Context, kmsClient KMSClient, keyName, audience string) (string, error) {
 	// Create JWT header
 	header := map[string]interface{}{
 		"alg": "ES256",

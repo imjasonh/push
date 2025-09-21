@@ -94,7 +94,7 @@ func processUserNotifications(ctx context.Context, ghToken string, userData regi
 }
 
 // sendPush sends a Web Push notification using KMS-signed VAPID
-func sendPush(ctx context.Context, endpoint string, notification *github.Notification, kmsClient *kms.KeyManagementClient, keyName string) error {
+func sendPush(ctx context.Context, endpoint string, notification *github.Notification, kmsClient crypto.KMSClient, keyName string) error {
 	// Prepare notification payload
 	payload := map[string]interface{}{
 		"title": fmt.Sprintf("GitHub: %s", *notification.Subject.Title),
